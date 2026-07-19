@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>MotionLink MVP</title>
+  </head>
+  <body>
+    <main class="app-shell">
+      <header>
+        <p class="eyebrow">LOCAL WEBRTC SCREEN STREAM</p>
+        <h1>MotionLink</h1>
+        <p class="description">Local low-latency desktop streaming.</p>
+      </header>
+
+      <section class="controls" aria-label="Connection">
+        <button id="connect" type="button">Connect</button>
+        <button id="disconnect" type="button" disabled>Disconnect</button>
+        <button id="play-video" type="button" hidden>Start video</button>
+        <output id="status" aria-live="polite">Disconnected</output>
+      </section>
+
+      <section class="stream-panel" aria-label="Remote screen">
+        <video id="remote-screen" autoplay playsinline muted></video>
+        <p>The Windows desktop will appear here after connecting. Audio and remote control are not part of this prototype.</p>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

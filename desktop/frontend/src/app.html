@@ -1,0 +1,32 @@
+<div class="app">
+  <header class="topbar">
+    <div class="brand">Motion<span>Link</span> Desktop</div>
+    <div class="mode">Local desktop streaming client</div>
+  </header>
+
+  <main>
+    <section class="controls" aria-label="Host connection">
+      <label class="address-label" for="server-address">
+        MotionLink Host address
+        <input id="server-address" type="url" value="http://127.0.0.1:8080" autocomplete="off">
+      </label>
+      <button id="connect" type="button">Connect</button>
+      <button id="disconnect" class="secondary" type="button" disabled>Disconnect</button>
+    </section>
+
+    <section class="video-panel" aria-label="Desktop video stream">
+      <video id="remote-screen" autoplay muted playsinline></video>
+      <button id="play-video" type="button" hidden>Start video</button>
+    </section>
+
+    <section class="input-panel" aria-live="polite">
+      <strong>Native input</strong>
+      <span id="native-input-status">Checking the native bridge…</span>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <output id="status">Disconnected</output>
+    <span>Video: H.264 / WebRTC · Input is currently disabled</span>
+  </footer>
+</div>

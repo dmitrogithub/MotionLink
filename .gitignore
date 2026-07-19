@@ -1,0 +1,11 @@
+# Go
+/host.exe
+/host
+
+# Frontend
+/web/node_modules/
+/web/dist/
+
+# Local runtime files
+/components/
+*.log
