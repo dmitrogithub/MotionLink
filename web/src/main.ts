@@ -98,7 +98,7 @@ function configurePeerConnection(connection: RTCPeerConnection): void {
       return;
     }
     if (connection.connectionState === "connected") {
-      setStatus("Connected. Waiting for desktop frames…");
+      setStatus("Connected. Waiting for desktop frames...");
       return;
     }
     setStatus(`WebRTC: ${connection.connectionState}`);
@@ -111,7 +111,7 @@ function configurePeerConnection(connection: RTCPeerConnection): void {
 async function connect(): Promise<void> {
   closeConnection(false);
   setConnectedControls(true);
-  setStatus("Connecting to the desktop…");
+  setStatus("Connecting to the desktop...");
 
   const connection = new RTCPeerConnection({ iceServers: [] });
   peerConnection = connection;

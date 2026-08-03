@@ -2,7 +2,7 @@
 
 MotionLink is an experimental, Windows-only local desktop streaming MVP. It captures the Windows desktop with FFmpeg, relays H.264 RTP through Go/Pion WebRTC, and displays the stream in a standalone Windows application.
 
-The native viewer is built with Wails. It uses Windows WebView2 as its rendering and WebRTC engine, but it runs in its own application window — not in a browser tab.
+The native viewer is built with Wails. It uses Windows WebView2 as its rendering and WebRTC engine, but it runs in its own application window, not in a browser tab.
 
 ## Architecture
 
@@ -23,12 +23,13 @@ Windows desktop
 - Checks whether `h264_nvenc` works at runtime and falls back to `libx264` when it does not.
 - Starts FFmpeg only after the WebRTC connection is established and stops it when the client disconnects.
 - Provides a standalone desktop viewer: `MotionLinkDesktop.exe`.
-- Defines a native input boundary for a future Windows event-capture implementation.
+- Supports local remote mouse movement, mouse buttons, mouse wheel, and common keyboard keys through a WebRTC DataChannel.
+- Requires both the host flag and an explicit client-side confirmation before it injects any input.
+- Defines a native input boundary for a future Windows global event-capture implementation.
 
 ## Not implemented yet
 
 - Audio
-- Remote mouse and keyboard control
 - Windows input hooks
 - MediaPipe or hand tracking
 - Authentication
@@ -37,21 +38,23 @@ Windows desktop
 
 The current host binds to `127.0.0.1`, so the MVP is intended to run on one PC only.
 
-## Native input roadmap
+## Remote control and native input
 
-MotionLink Desktop already contains the Go-level [`nativeinput.Source`](desktop/nativeinput/source.go) contract. It is intentionally inactive in this release: the application does not observe, transmit, or inject user input.
+The current remote-control path is intentionally scoped to the desktop application's video panel. It captures pointer events over the video and keyboard events only while the panel has focus; it does not install global Windows keyboard or mouse hooks.
 
-The next input stage should follow this explicit flow:
+To enable control, start the host with `--enable-control`, connect the desktop application, select **Enable remote mouse and keyboard**, approve the confirmation dialog, and click the video panel before using the keyboard. Remote input is disabled automatically when the app loses focus or the connection closes.
+
+MotionLink Desktop also contains the Go-level [`nativeinput.Source`](desktop/nativeinput/source.go) contract. It remains inactive and is reserved for a future opt-in global input-capture mode:
 
 ```text
-User explicitly enables input capture
+User explicitly enables global input capture
   -> Windows hooks in the Wails/Go client
   -> a dedicated WebRTC DataChannel
   -> validation on the Go host
   -> SendInput on the host
 ```
 
-This separation keeps privileged OS event access outside frontend JavaScript and makes the consent boundary visible.
+The host tracks pressed keys and mouse buttons per session and releases them when the connection ends. This separation keeps privileged OS event access outside frontend JavaScript and makes the consent boundary visible.
 
 ## Prerequisites
 
@@ -86,7 +89,7 @@ cd ..
 Start the local host in one PowerShell window:
 
 ```powershell
-go run -buildvcs=false ./cmd/host
+go run -buildvcs=false ./cmd/host --enable-control
 ```
 
 Build the desktop application in another window:
@@ -96,7 +99,7 @@ cd desktop
 wails build -m -clean -webview2 browser
 ```
 
-Run `desktop\build\bin\MotionLinkDesktop.exe`, keep the default host address `http://127.0.0.1:8080`, and select **Connect**.
+Run `desktop\build\bin\MotionLinkDesktop.exe`, keep the default host address `http://127.0.0.1:8080`, and select **Connect**. To control the host, enable the remote-control checkbox and click the video panel before pressing keys.
 
 Expected host output:
 
@@ -124,6 +127,12 @@ Use a specific FFmpeg executable:
 go run -buildvcs=false ./cmd/host --ffmpeg "C:\Tools\ffmpeg\bin\ffmpeg.exe"
 ```
 
+Remote input is disabled by default. Enable it only for a trusted local session:
+
+```powershell
+go run -buildvcs=false ./cmd/host --enable-control
+```
+
 ## Validation
 
 Host:
@@ -147,6 +156,7 @@ wails build -m -clean -webview2 browser
 ```text
 cmd/host/              Local host entry point
 internal/ffmpeg/       FFmpeg discovery, encoder selection, and capture lifecycle
+internal/input/        Validated DataChannel protocol and Windows SendInput bridge
 internal/rtc/          Pion WebRTC and RTP -> TrackLocalStaticRTP relay
 internal/signaling/    HTTP offer/answer signaling and CORS
 desktop/               Wails desktop application
@@ -161,7 +171,9 @@ web/                   Legacy browser prototype (not the primary client)
 - If that line is absent, FFmpeg is not producing RTP packets. Confirm that your FFmpeg build supports `gdigrab` and `libx264` or `h264_nvenc`.
 - If `h264_nvenc` is listed but cannot initialize, MotionLink automatically switches to `libx264`.
 - If the video requires user interaction, select **Start video** in the desktop client.
+- If the control checkbox is rejected, restart the host with `--enable-control`.
+- To send keyboard input, first click the video panel. The application stops control when it loses focus.
 
 ## Security note
 
-MotionLink is a local prototype, not a hardened remote-access product. Do not expose its HTTP signaling endpoint to untrusted networks. Authentication, encrypted peer discovery, consent UI, and input authorization must be added before any Internet or remote-control use.
+MotionLink is a local prototype, not a hardened remote-access product. Do not expose its HTTP signaling endpoint to untrusted networks. `SendInput` can only inject into processes at an equal or lower Windows integrity level, and Windows may block other injection attempts. Authentication, encrypted peer discovery, stronger consent UI, and input authorization must be added before any Internet use.

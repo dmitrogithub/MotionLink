@@ -144,6 +144,20 @@ button:disabled {
   background: repeating-linear-gradient(45deg, #101b32, #101b32 18px, #13203b 18px, #13203b 36px);
 }
 
+.video-panel:focus {
+  outline: 2px solid #8ac0ff;
+  outline-offset: 3px;
+}
+
+.video-panel[data-control-active="true"] {
+  border-color: #75d7a4;
+  box-shadow: 0 0 0 1px #75d7a4, 0 16px 36px rgba(0, 0, 0, 0.2);
+}
+
+.video-panel[data-control-active="true"] video {
+  cursor: crosshair;
+}
+
 video {
   display: block;
   width: 100%;
@@ -162,15 +176,57 @@ video {
   display: flex;
   gap: 12px;
   align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
   padding: 13px 16px;
 }
 
-.input-panel strong {
-  flex: 0 0 auto;
+.control-copy {
+  display: grid;
+  gap: 4px;
 }
 
-#native-input-status[data-state="reserved"] {
+.control-copy strong {
+  color: #edf4ff;
+}
+
+#control-status {
   color: #b9c9e6;
+}
+
+#control-status[data-state="pending"] {
+  color: #ffd17d;
+}
+
+#control-status[data-state="active"] {
+  color: #75d7a4;
+}
+
+#control-status[data-state="rejected"] {
+  color: #ffaaa4;
+}
+
+#native-input-status {
+  color: #8295b5;
+}
+
+.control-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #d7e6ff;
+  font-weight: 650;
+  user-select: none;
+}
+
+.control-toggle input {
+  width: 18px;
+  height: 18px;
+  accent-color: #75d7a4;
+}
+
+.control-toggle:has(input:disabled) {
+  opacity: 0.52;
 }
 
 output {

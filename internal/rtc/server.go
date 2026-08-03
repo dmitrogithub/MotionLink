@@ -2,6 +2,7 @@ package rtc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"github.com/pion/webrtc/v4"
 
 	"motionlink/internal/ffmpeg"
+	hostinput "motionlink/internal/input"
 )
 
 // ClientAlreadyConnectedError is returned while a browser session is active.
@@ -22,9 +24,10 @@ func (ClientAlreadyConnectedError) Error() string {
 }
 
 type Config struct {
-	RTPPort       int
-	FFmpegManager *ffmpeg.Manager
-	Logger        *log.Logger
+	RTPPort        int
+	FFmpegManager  *ffmpeg.Manager
+	Logger         *log.Logger
+	ControlEnabled bool
 }
 
 // Server accepts one WebRTC client and owns its FFmpeg capture lifecycle.
@@ -43,6 +46,7 @@ type session struct {
 	cancel  context.CancelFunc
 	peer    *webrtc.PeerConnection
 	relay   *RTPRelay
+	control *hostinput.Controller
 
 	closeOnce sync.Once
 }
@@ -149,6 +153,7 @@ func (s *Server) newSession() (*session, error) {
 		cancel:  cancel,
 		peer:    peer,
 		relay:   relay,
+		control: hostinput.NewController(s.config.ControlEnabled, s.config.Logger),
 	}
 
 	sender, err := peer.AddTrack(track)
@@ -167,6 +172,36 @@ func (s *Server) newSession() (*session, error) {
 }
 
 func (s *Server) configurePeerConnection(current *session) {
+	current.peer.OnDataChannel(func(channel *webrtc.DataChannel) {
+		if channel.Label() != "motion-input" {
+			s.config.Logger.Printf("rejecting unexpected data channel %q", channel.Label())
+			_ = channel.Close()
+			return
+		}
+
+		channel.OnOpen(func() {
+			s.config.Logger.Printf("motion-input data channel opened")
+		})
+		channel.OnMessage(func(message webrtc.DataChannelMessage) {
+			if !message.IsString {
+				s.config.Logger.Printf("ignoring binary motion-input message")
+				return
+			}
+			event, err := hostinput.Decode(message.Data)
+			if err != nil {
+				s.config.Logger.Printf("invalid motion-input event: %v", err)
+				return
+			}
+			result, err := current.control.Handle(event)
+			if err != nil {
+				s.config.Logger.Printf("apply motion-input event %q: %v", event.Type, err)
+			}
+			if event.Type == hostinput.EventControl {
+				current.sendControlStatus(channel, result)
+			}
+		})
+	})
+
 	current.peer.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		s.config.Logger.Printf("WebRTC connection state: %s", state.String())
 		switch state {
@@ -176,6 +211,25 @@ func (s *Server) configurePeerConnection(current *session) {
 			go current.close("browser client disconnected")
 		}
 	})
+}
+
+func (s *session) sendControlStatus(channel *webrtc.DataChannel, result hostinput.Result) {
+	payload, err := json.Marshal(struct {
+		Type    string `json:"type"`
+		Enabled bool   `json:"enabled"`
+		Message string `json:"message"`
+	}{
+		Type:    "control-status",
+		Enabled: result.Enabled,
+		Message: result.Message,
+	})
+	if err != nil {
+		s.server.config.Logger.Printf("encode control status: %v", err)
+		return
+	}
+	if err := channel.SendText(string(payload)); err != nil {
+		s.server.config.Logger.Printf("send control status: %v", err)
+	}
 }
 
 func (s *session) startCapture() {
@@ -188,6 +242,9 @@ func (s *session) startCapture() {
 func (s *session) close(reason string) {
 	s.closeOnce.Do(func() {
 		s.server.config.Logger.Printf("closing WebRTC session: %s", reason)
+		if err := s.control.ReleaseAll(); err != nil {
+			s.server.config.Logger.Printf("release remote input: %v", err)
+		}
 		s.cancel()
 		s.server.config.FFmpegManager.Stop()
 		s.relay.Close()

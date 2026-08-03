@@ -14,19 +14,26 @@
       <button id="disconnect" class="secondary" type="button" disabled>Disconnect</button>
     </section>
 
-    <section class="video-panel" aria-label="Desktop video stream">
+    <section id="video-panel" class="video-panel" aria-label="Desktop video stream" tabindex="0">
       <video id="remote-screen" autoplay muted playsinline></video>
       <button id="play-video" type="button" hidden>Start video</button>
     </section>
 
     <section class="input-panel" aria-live="polite">
-      <strong>Native input</strong>
-      <span id="native-input-status">Checking the native bridge…</span>
+      <div class="control-copy">
+        <strong>Remote control</strong>
+        <span id="control-status">Connect to check whether the host allows remote control.</span>
+        <small id="native-input-status">Checking the native bridge...</small>
+      </div>
+      <label class="control-toggle" for="enable-control">
+        <input id="enable-control" type="checkbox" disabled>
+        Enable remote mouse and keyboard
+      </label>
     </section>
   </main>
 
   <footer class="footer">
     <output id="status">Disconnected</output>
-    <span>Video: H.264 / WebRTC · Input is currently disabled</span>
+    <span>Video: H.264 / WebRTC - Remote input requires explicit approval</span>
   </footer>
 </div>

@@ -21,6 +21,7 @@ func main() {
 	listenAddress := flag.String("listen", "127.0.0.1:8080", "HTTP signaling address")
 	rtpPort := flag.Int("rtp-port", 5004, "local UDP port that receives H.264 RTP from FFmpeg")
 	ffmpegBinary := flag.String("ffmpeg", defaultFFmpegBinary(), "path to the FFmpeg executable")
+	enableControl := flag.Bool("enable-control", false, "allow the local desktop client to inject mouse and keyboard input after explicit client consent")
 	flag.Parse()
 
 	logger := log.New(os.Stdout, "motionlink: ", log.LstdFlags|log.Lmicroseconds)
@@ -29,9 +30,10 @@ func main() {
 
 	ffmpegManager := ffmpeg.NewManager(*ffmpegBinary, logger)
 	host, err := rtc.NewServer(rootContext, rtc.Config{
-		RTPPort:       *rtpPort,
-		FFmpegManager: ffmpegManager,
-		Logger:        logger,
+		RTPPort:        *rtpPort,
+		FFmpegManager:  ffmpegManager,
+		Logger:         logger,
+		ControlEnabled: *enableControl,
 	})
 	if err != nil {
 		logger.Fatalf("create RTC server: %v", err)
