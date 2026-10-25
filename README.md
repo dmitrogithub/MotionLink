@@ -1,179 +1,143 @@
-# MotionLink
+# MotionLink 2.0
 
-MotionLink is an experimental, Windows-only local desktop streaming MVP. It captures the Windows desktop with FFmpeg, relays H.264 RTP through Go/Pion WebRTC, and displays the stream in a standalone Windows application.
-
-The native viewer is built with Wails. It uses Windows WebView2 as its rendering and WebRTC engine, but it runs in its own application window, not in a browser tab.
-
-## Architecture
+MotionLink streams a Windows desktop with low latency and lets you control it with the mouse and keyboard from a **phone**, **another PC**, or the **desktop app**. FFmpeg captures the screen (NVENC or x264), and Go/Pion delivers it over WebRTC.
 
 ```text
-Windows desktop
-  -> FFmpeg (gdigrab + H.264)
-  -> RTP on 127.0.0.1:5004
-  -> Go / Pion / TrackLocalStaticRTP
-  -> WebRTC
-  -> MotionLink Desktop (Wails application)
+Windows PC (host)                                    Client
+FFmpeg gdigrab → H.264 RTP → Go/Pion WebRTC ═══════► phone (browser / PWA)
+                                │                    another PC (browser)
+                                │                    MotionLink Desktop (Wails)
+            signaling: direct HTTP or through a relay (+ TURN tunnel)
 ```
 
-## Current capabilities
+## What's new in 2.0
 
-- Streams the full Windows desktop to one local desktop client.
-- Uses HTTP offer/answer signaling at `POST /api/offer`.
-- Uses low-latency capture settings: 60 FPS, short GOP, no B-frames, and RTP packets up to 1200 bytes.
-- Checks whether `h264_nvenc` works at runtime and falls back to `libx264` when it does not.
-- Starts FFmpeg only after the WebRTC connection is established and stops it when the client disconnects.
-- Provides a standalone desktop viewer: `MotionLinkDesktop.exe`.
-- Supports local remote mouse movement, mouse buttons, mouse wheel, and common keyboard keys through a WebRTC DataChannel.
-- Requires both the host flag and an explicit client-side confirmation before it injects any input.
-- Defines a native input boundary for a future Windows global event-capture implementation.
+| Feature | How it works |
+|---|---|
+| **Phone → PC** | The host serves the web client itself. On the phone, open `http://<PC address>:8080` or scan the QR code in the host window, and the key is filled in for you. Touch control: tap to click, hold to right-click, drag, and use two fingers to scroll. There is also a Trackpad mode, an on-screen keyboard with full Unicode text input, and quick keys (Esc, Tab, Ctrl+C/V, Alt+Tab and more). The client installs as an app (PWA) when it is opened over HTTPS. |
+| **PC → PC** | The desktop app and every browser use the same client. The host listens on the network (`0.0.0.0:8080`), not only on `127.0.0.1`. |
+| **Access key** | The host shows a key such as `ABCD-EFGH-JKLM`, and the client types it in. The key **never crosses the network**. Offers and answers are signed with HMAC-SHA256, so neither the relay nor anyone else on the network can impersonate the host or the client. Replays and key guessing are blocked. The key persists between runs (`--key` sets your own, `--new-key` generates a new one). |
+| **Performance** | Three presets: **30 FPS** (4 Mbit/s, up to 1600 px, for mobile data), **60 FPS** (10 Mbit/s, 1080p) and **High quality** (native resolution, 25 Mbit/s). They switch live, without reconnecting. |
+| **Tunneling** | A relay server handles hosts behind NAT: the host connects out to the relay, so no port forwarding is needed. The relay has a built-in TURN server (UDP and TCP) for cases where a direct peer-to-peer path is impossible. On the host, all WebRTC traffic uses **one port** for UDP and TCP (`--ice-port`, 50000 by default), which is the only port to forward. STUN is on by default. Lost packets are retransmitted (NACK). The client reconnects automatically when the network changes (Wi-Fi ↔ LTE), and the host keeps the session for 15 seconds while it recovers. The client shows the connection path: Local network, P2P through NAT, or TURN tunnel. |
 
-## Not implemented yet
+Fixed along the way: NVENC never ran before, because the 16×16 probe frame is below the NVENC minimum, so the host always fell back to x264. GPU encoding now works. FFmpeg also no longer keeps running after the host crashes or is killed.
 
-- Audio
-- Windows input hooks
-- MediaPipe or hand tracking
-- Authentication
-- STUN/TURN, LAN discovery, or Internet connectivity
-- Multi-client streaming
+## Requirements
 
-The current host binds to `127.0.0.1`, so the MVP is intended to run on one PC only.
+- Host: Windows 10/11 and FFmpeg with `gdigrab` and `h264_nvenc` or `libx264` (in `PATH` or in `components\ffmpeg`)
+- Build: Go 1.25+, and Node.js 20+ only to rebuild the web client (a prebuilt copy is in `web/dist`)
+- Desktop app: WebView2 Runtime and [Wails v2](https://wails.io)
+- Phone client: any modern browser (Chrome, Safari, Firefox)
 
-## Remote control and native input
-
-The current remote-control path is intentionally scoped to the desktop application's video panel. It captures pointer events over the video and keyboard events only while the panel has focus; it does not install global Windows keyboard or mouse hooks.
-
-To enable control, start the host with `--enable-control`, connect the desktop application, select **Enable remote mouse and keyboard**, approve the confirmation dialog, and click the video panel before using the keyboard. Remote input is disabled automatically when the app loses focus or the connection closes.
-
-MotionLink Desktop also contains the Go-level [`nativeinput.Source`](desktop/nativeinput/source.go) contract. It remains inactive and is reserved for a future opt-in global input-capture mode:
-
-```text
-User explicitly enables global input capture
-  -> Windows hooks in the Wails/Go client
-  -> a dedicated WebRTC DataChannel
-  -> validation on the Go host
-  -> SendInput on the host
-```
-
-The host tracks pressed keys and mouse buttons per session and releases them when the connection ends. This separation keeps privileged OS event access outside frontend JavaScript and makes the consent boundary visible.
-
-## Prerequisites
-
-- Windows 10 or 11
-- Go 1.24 or newer
-- Node.js 20 or newer with npm
-- FFmpeg with `gdigrab` and either `h264_nvenc` or `libx264`
-- Microsoft Edge WebView2 Runtime
-- Wails v2 for building the desktop application
-
-Install Wails after Go is available:
+## Quick start: phone or PC on the same network
 
 ```powershell
-go install github.com/wailsapp/wails/v2/cmd/wails@latest
+go run ./cmd/host --enable-control
 ```
 
-The project also supports local tool copies under `components/`, but that directory is intentionally ignored by Git.
+The host window shows the access key, a link such as `http://192.168.1.10:8080/#key=…`, and a QR code. Scan it with the phone or open the link on another PC. When Windows asks for firewall access for the host, allow it on private networks.
 
-## Quick start
+Without `--enable-control`, clients can only view. Even with the flag, the client must turn on Control and confirm it.
 
-Install the dependencies:
+## Connecting from another network
+
+### Option A: relay server (recommended)
+
+On any VPS with a public IP (Linux works):
+
+```bash
+./motionlink-relay-linux-amd64 --listen :8443 --tls-cert cert.pem --tls-key key.pem --public-ip 203.0.113.10
+```
+
+Open these ports in the VPS firewall: TCP 8443 (API and web client), UDP+TCP 3478 (STUN/TURN), and UDP 49160–49300 (TURN relay). You can also run the relay behind Caddy or nginx; in that case add `--trust-proxy`.
+
+On the host:
 
 ```powershell
-go mod download
-
-cd desktop
-go mod download
-npm install
-cd ..
+go run ./cmd/host --enable-control --relay https://relay.example.com:8443
 ```
 
-Start the local host in one PowerShell window:
+On the phone, open `https://relay.example.com:8443`, choose **Via relay**, and enter the key. Over HTTPS, the client can be added to the home screen as an app.
+
+The relay sees only a hash of the key (the "room" name) and forwards signed messages. It cannot read the video, because DTLS-SRTP encrypts it end to end, and it cannot impersonate the host. TURN credentials last 12 hours and are issued only for a room whose host is online.
+
+### Option B: port forwarding
+
+Forward TCP 8080 and UDP+TCP 50000 on the router to the host PC:
 
 ```powershell
-go run -buildvcs=false ./cmd/host --enable-control
+go run ./cmd/host --enable-control --public-ip <your public IP>
 ```
 
-Build the desktop application in another window:
+Client: **Direct** mode, address `http://<public IP>:8080`.
+
+## Desktop app
 
 ```powershell
 cd desktop
 wails build -m -clean -webview2 browser
 ```
 
-Run `desktop\build\bin\MotionLinkDesktop.exe`, keep the default host address `http://127.0.0.1:8080`, and select **Connect**. To control the host, enable the remote-control checkbox and click the video panel before pressing keys.
+`desktop\build\bin\MotionLinkDesktop.exe` uses the same client as the browser: mode, address, key, and quality.
 
-Expected host output:
+## Host options
 
-```text
-WebRTC connection state: connected
-FFmpeg started: encoder=h264_nvenc RTP=127.0.0.1:5004
-desktop RTP is flowing: first H.264 packet received from FFmpeg
-```
+| Flag | Default | Purpose |
+|---|---|---|
+| `--listen` | `0.0.0.0:8080` | Signaling and web client address (`127.0.0.1:8080` limits it to this PC) |
+| `--key` / `--new-key` | saved key | Set your own key / generate a new one |
+| `--enable-control` | off | Allow remote control |
+| `--relay` | — | Relay address for connections from other networks |
+| `--ice-port` | `50000` | Single WebRTC port (UDP with TCP fallback); `0` uses random UDP ports |
+| `--public-ip` | — | Public IP for a forwarded port |
+| `--stun` | Google, Cloudflare | STUN servers; an empty value disables STUN |
+| `--turn`, `--turn-user`, `--turn-pass` | — | External TURN server |
+| `--rtp-port` | `5004` | Local FFmpeg → host port |
+| `--ffmpeg` | auto | Path to `ffmpeg.exe` |
+| `--name` | PC name | Name shown to clients |
+| `--no-web` | — | Do not serve the web client |
 
-Seeing `libx264` instead of `h264_nvenc` is valid: FFmpeg is using the CPU encoder.
+Relay options: `--listen`, `--tls-cert`, `--tls-key`, `--public-ip`, `--turn-port` (`0` disables TURN), `--turn-secret`, `--relay-ports`, `--trust-proxy`, `--no-web`.
 
-## Configuration
-
-By default, the host uses HTTP signaling on `127.0.0.1:8080` and receives RTP on `127.0.0.1:5004`.
-
-Use a different RTP port:
-
-```powershell
-go run -buildvcs=false ./cmd/host --rtp-port 5006
-```
-
-Use a specific FFmpeg executable:
-
-```powershell
-go run -buildvcs=false ./cmd/host --ffmpeg "C:\Tools\ffmpeg\bin\ffmpeg.exe"
-```
-
-Remote input is disabled by default. Enable it only for a trusted local session:
+## Building and testing
 
 ```powershell
-go run -buildvcs=false ./cmd/host --enable-control
+powershell -ExecutionPolicy Bypass -File scripts\build.ps1
 ```
 
-## Validation
+The script builds the web client, checks that the TypeScript and Go cryptography match, runs the tests, and writes `MotionLinkHost.exe`, `MotionLinkRelay.exe`, `motionlink-relay-linux-amd64` (and the desktop app, if Wails is installed) to `dist\`.
 
-Host:
-
-```powershell
-go test -buildvcs=false ./...
-go build -buildvcs=false ./cmd/host
-```
-
-Desktop application:
+Manually:
 
 ```powershell
-cd desktop
-go test -buildvcs=false ./...
-npm run build
-wails build -m -clean -webview2 browser
+cd web; npm install; npm run build; npm run check:crypto; cd ..
+go test ./...
+go build ./cmd/host ./cmd/relay
 ```
 
 ## Project layout
 
 ```text
-cmd/host/              Local host entry point
-internal/ffmpeg/       FFmpeg discovery, encoder selection, and capture lifecycle
-internal/input/        Validated DataChannel protocol and Windows SendInput bridge
-internal/rtc/          Pion WebRTC and RTP -> TrackLocalStaticRTP relay
-internal/signaling/    HTTP offer/answer signaling and CORS
-desktop/               Wails desktop application
-desktop/frontend/      Strict TypeScript desktop UI
-desktop/nativeinput/   Contract for future native Windows input capture
-web/                   Legacy browser prototype (not the primary client)
+cmd/host/            Host: access key, QR banner, network flags
+cmd/relay/           Relay server (signaling + TURN)
+internal/auth/       Access key, HMAC signatures, replay and brute-force protection
+internal/ffmpeg/     FFmpeg/NVENC detection, quality presets, process lifecycle
+internal/input/      DataChannel protocol and SendInput (including Unicode text input)
+internal/relay/      Relay: rooms, long polling, TURN, and the host-side relay client
+internal/rtc/        Pion WebRTC: single ICE port, NACK, reconnection, quality switching
+internal/signaling/  Host HTTP signaling and web client serving
+web/                 Shared client (phone, browser, desktop), PWA; dist/ is embedded in the host and relay
+desktop/             Wails shell around the shared client
 ```
 
-## Troubleshooting
+## Limitations
 
-- If the application connects but no video appears, check the host terminal for `desktop RTP is flowing`.
-- If that line is absent, FFmpeg is not producing RTP packets. Confirm that your FFmpeg build supports `gdigrab` and `libx264` or `h264_nvenc`.
-- If `h264_nvenc` is listed but cannot initialize, MotionLink automatically switches to `libx264`.
-- If the video requires user interaction, select **Start video** in the desktop client.
-- If the control checkbox is rejected, restart the host with `--enable-control`.
-- To send keyboard input, first click the video panel. The application stops control when it loses focus.
+- Audio is not streamed yet.
+- The host runs on Windows only (`gdigrab` capture, `SendInput` input). The relay runs on Windows and Linux.
+- `SendInput` cannot control windows running as administrator unless the host also runs elevated, and it cannot press Ctrl+Alt+Del.
+- The Windows key is intentionally not forwarded.
+- Installing the PWA requires HTTPS (a relay with a certificate). Over `http://`, the phone client works but opens in the browser.
 
-## Security note
+## Security
 
-MotionLink is a local prototype, not a hardened remote-access product. Do not expose its HTTP signaling endpoint to untrusted networks. `SendInput` can only inject into processes at an equal or lower Windows integrity level, and Windows may block other injection attempts. Authentication, encrypted peer discovery, stronger consent UI, and input authorization must be added before any Internet use.
+Every connection is signed with the access key. The host limits wrong attempts (8 per minute per address) and rejects stale (±2 minutes) and repeated requests. The client verifies the answer's signature, so a relay cannot substitute another host. Media and the DataChannel are encrypted with DTLS. Use a long key (`--key`) if the host is reachable from the Internet, and turn on `--enable-control` only when you need remote control.

@@ -2,30 +2,20 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="color-scheme" content="dark" />
-    <title>MotionLink MVP</title>
+    <meta name="theme-color" content="#0b1020" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="MotionLink" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" type="image/png" href="./icon-192.png" />
+    <link rel="apple-touch-icon" href="./icon-192.png" />
+    <title>MotionLink</title>
   </head>
   <body>
-    <main class="app-shell">
-      <header>
-        <p class="eyebrow">LOCAL WEBRTC SCREEN STREAM</p>
-        <h1>MotionLink</h1>
-        <p class="description">Local low-latency desktop streaming.</p>
-      </header>
-
-      <section class="controls" aria-label="Connection">
-        <button id="connect" type="button">Connect</button>
-        <button id="disconnect" type="button" disabled>Disconnect</button>
-        <button id="play-video" type="button" hidden>Start video</button>
-        <output id="status" aria-live="polite">Disconnected</output>
-      </section>
-
-      <section class="stream-panel" aria-label="Remote screen">
-        <video id="remote-screen" autoplay playsinline muted></video>
-        <p>The Windows desktop will appear here after connecting. Audio and remote control are not part of this prototype.</p>
-      </section>
-    </main>
+    <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

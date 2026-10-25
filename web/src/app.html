@@ -1,0 +1,97 @@
+<div class="app" data-phase="idle">
+  <section class="connect" aria-label="Connection">
+    <header class="brand-block">
+      <div class="brand">Motion<span>Link</span></div>
+      <p class="tagline">Remote desktop from your phone or PC</p>
+    </header>
+
+    <form id="connect-form" class="card" autocomplete="off" novalidate>
+      <div class="segmented" role="radiogroup" aria-label="Connection method">
+        <label>
+          <input type="radio" name="mode" value="direct" checked>
+          <span>Direct</span>
+        </label>
+        <label>
+          <input type="radio" name="mode" value="relay">
+          <span>Via relay</span>
+        </label>
+      </div>
+      <p id="mode-hint" class="hint">A PC on the same network or with a forwarded port.</p>
+
+      <label class="field">
+        <span id="address-label">Computer address</span>
+        <input id="address" type="text" inputmode="url" spellcheck="false" autocapitalize="off" placeholder="192.168.1.10:8080">
+      </label>
+
+      <label class="field">
+        <span>Access key</span>
+        <input id="key" class="key-input" type="text" spellcheck="false" autocapitalize="characters" autocomplete="off" placeholder="XXXX-XXXX-XXXX" maxlength="64">
+      </label>
+
+      <fieldset class="quality">
+        <legend>Performance</legend>
+        <div id="quality-options" class="quality-options"></div>
+      </fieldset>
+
+      <label class="check">
+        <input id="remember-key" type="checkbox" checked>
+        <span>Remember the key on this device</span>
+      </label>
+
+      <button id="connect" class="primary" type="submit">Connect</button>
+      <output id="connect-status" class="status-line" aria-live="polite"></output>
+    </form>
+
+    <p class="footnote">The key is shown in the host window. It never crosses the network: the devices verify each other with signatures.</p>
+  </section>
+
+  <section class="viewer" aria-label="Remote screen">
+    <div id="video-panel" class="video-panel" tabindex="0">
+      <video id="remote-screen" autoplay muted playsinline disablepictureinpicture></video>
+      <button id="play-video" class="primary floating-center" type="button" hidden>Start video</button>
+      <div id="overlay-status" class="overlay-status" hidden></div>
+    </div>
+
+    <div id="toolbar" class="toolbar">
+      <button id="toolbar-toggle" class="icon-button toolbar-handle" type="button" aria-label="Hide toolbar" aria-expanded="true">⌃</button>
+      <div class="toolbar-row">
+        <div class="stats">
+          <span id="path-badge" class="badge">…</span>
+          <span id="stats-text" class="stats-text"></span>
+        </div>
+        <div class="toolbar-actions">
+          <select id="quality-select" aria-label="Performance"></select>
+          <label class="toggle" title="Mouse and keyboard control">
+            <input id="enable-control" type="checkbox" disabled>
+            <span>Control</span>
+          </label>
+          <select id="touch-mode" aria-label="Touch mode" hidden>
+            <option value="direct">Touch</option>
+            <option value="trackpad">Trackpad</option>
+          </select>
+          <button id="keyboard" class="icon-button" type="button" title="Keyboard" hidden>⌨</button>
+          <button id="fullscreen" class="icon-button" type="button" title="Fullscreen">⛶</button>
+          <button id="disconnect" class="danger" type="button">Disconnect</button>
+        </div>
+      </div>
+      <div id="quick-keys" class="quick-keys" hidden>
+        <button type="button" data-combo="Escape">Esc</button>
+        <button type="button" data-combo="Tab">Tab</button>
+        <button type="button" data-combo="Enter">Enter</button>
+        <button type="button" data-combo="Backspace">⌫</button>
+        <button type="button" data-combo="Delete">Del</button>
+        <button type="button" data-combo="ArrowLeft">←</button>
+        <button type="button" data-combo="ArrowUp">↑</button>
+        <button type="button" data-combo="ArrowDown">↓</button>
+        <button type="button" data-combo="ArrowRight">→</button>
+        <button type="button" data-combo="ControlLeft KeyC">Ctrl+C</button>
+        <button type="button" data-combo="ControlLeft KeyV">Ctrl+V</button>
+        <button type="button" data-combo="ControlLeft KeyZ">Ctrl+Z</button>
+        <button type="button" data-combo="AltLeft Tab">Alt+Tab</button>
+        <button type="button" data-combo="AltLeft F4">Alt+F4</button>
+      </div>
+      <small id="control-status" class="control-status"></small>
+    </div>
+    <textarea id="keyboard-proxy" class="keyboard-proxy" aria-hidden="true" autocapitalize="off" autocomplete="off" spellcheck="false"></textarea>
+  </section>
+</div>

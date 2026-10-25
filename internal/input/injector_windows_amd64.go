@@ -5,6 +5,7 @@ package input
 import (
 	"fmt"
 	"math"
+	"unicode/utf16"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -25,7 +26,8 @@ const (
 	mouseVirtualDesk = 0x4000
 	mouseAbsolute    = 0x8000
 
-	keyUp = 0x0002
+	keyUp      = 0x0002
+	keyUnicode = 0x0004
 )
 
 var (
@@ -88,6 +90,18 @@ func (windowsInjector) Key(virtualKey uint16, down bool) error {
 	return send(nativeKeyboard(virtualKey, flags))
 }
 
+func (windowsInjector) Text(text string) error {
+	units := utf16.Encode([]rune(text))
+	inputs := make([]nativeInput, 0, len(units)*2)
+	for _, unit := range units {
+		inputs = append(inputs,
+			nativeUnicode(unit, keyUnicode),
+			nativeUnicode(unit, keyUnicode|keyUp),
+		)
+	}
+	return send(inputs...)
+}
+
 func normalize(value float64) int32 {
 	clamped := math.Max(0, math.Min(1, value))
 	return int32(math.Round(clamped * 65535))
@@ -131,6 +145,15 @@ func nativeKeyboard(virtualKey uint16, flags uint32) nativeInput {
 	*(*keyboardInput)(unsafe.Pointer(&result.data[0])) = keyboardInput{
 		virtualKey: virtualKey,
 		flags:      flags,
+	}
+	return result
+}
+
+func nativeUnicode(unit uint16, flags uint32) nativeInput {
+	result := nativeInput{typeID: inputKeyboard}
+	*(*keyboardInput)(unsafe.Pointer(&result.data[0])) = keyboardInput{
+		scanCode: unit,
+		flags:    flags,
 	}
 	return result
 }

@@ -7,6 +7,7 @@ import (
 	"log"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -27,6 +28,9 @@ type Manager struct {
 	cmd    *exec.Cmd
 	cancel context.CancelFunc
 	done   chan struct{}
+
+	checkMu sync.Mutex
+	checked *CheckResult
 }
 
 func NewManager(binary string, logger *log.Logger) *Manager {
@@ -34,8 +38,23 @@ func NewManager(binary string, logger *log.Logger) *Manager {
 }
 
 // Check verifies that FFmpeg is available and selects NVENC when the encoder
-// is advertised. libx264 is the CPU fallback.
+// is advertised. libx264 is the CPU fallback. The probe takes a noticeable
+// moment, so a successful result is cached for later sessions.
 func (m *Manager) Check(ctx context.Context) (CheckResult, error) {
+	m.checkMu.Lock()
+	defer m.checkMu.Unlock()
+	if m.checked != nil {
+		return *m.checked, nil
+	}
+	result, err := m.probe(ctx)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	m.checked = &result
+	return result, nil
+}
+
+func (m *Manager) probe(ctx context.Context) (CheckResult, error) {
 	if runtime.GOOS != "windows" {
 		return CheckResult{}, fmt.Errorf("desktop capture is implemented for Windows only")
 	}
@@ -70,7 +89,9 @@ func encoderWorks(ctx context.Context, path, encoder string) bool {
 		"-hide_banner",
 		"-loglevel", "error",
 		"-f", "lavfi",
-		"-i", "color=c=black:s=16x16:r=1",
+		// NVENC rejects frames smaller than about 145x49, so a tiny probe
+		// frame would always report it as unavailable.
+		"-i", "color=c=black:s=256x256:r=1",
 		"-frames:v", "1",
 		"-c:v", encoder,
 		"-f", "null",
@@ -82,7 +103,7 @@ func encoderWorks(ctx context.Context, path, encoder string) bool {
 // Start begins a gdigrab desktop capture that sends H.264 RTP to localhost.
 // The process is tied to parentContext and is stopped by either its cancellation
 // or Stop.
-func (m *Manager) Start(parentContext context.Context, rtpPort int) error {
+func (m *Manager) Start(parentContext context.Context, rtpPort int, profile Profile) error {
 	if rtpPort < 1 || rtpPort > 65535 {
 		return fmt.Errorf("invalid RTP port %d", rtpPort)
 	}
@@ -99,19 +120,23 @@ func (m *Manager) Start(parentContext context.Context, rtpPort int) error {
 	}
 
 	processContext, cancel := context.WithCancel(parentContext)
-	command := exec.CommandContext(processContext, check.Path, captureArguments(check.Encoder, rtpPort)...)
+	command := exec.CommandContext(processContext, check.Path, captureArguments(check.Encoder, rtpPort, profile)...)
 	command.Stdout = m.logger.Writer()
 	command.Stderr = m.logger.Writer()
 	if err := command.Start(); err != nil {
 		cancel()
 		return fmt.Errorf("start FFmpeg with %s: %w", check.Encoder, err)
 	}
+	if err := bindToHostLifetime(command.Process); err != nil {
+		m.logger.Printf("FFmpeg may outlive the host if it crashes: %v", err)
+	}
 
 	done := make(chan struct{})
 	m.cmd = command
 	m.cancel = cancel
 	m.done = done
-	m.logger.Printf("FFmpeg started: encoder=%s RTP=127.0.0.1:%d", check.Encoder, rtpPort)
+	m.logger.Printf("FFmpeg started: encoder=%s profile=%s (%d FPS, %s, max width %d) RTP=127.0.0.1:%d",
+		check.Encoder, profile.ID, profile.FPS, profile.bitrate(), profile.MaxWidth, rtpPort)
 
 	go m.wait(command, processContext, done)
 	return nil
@@ -154,47 +179,44 @@ func (m *Manager) wait(command *exec.Cmd, processContext context.Context, done c
 	m.logger.Printf("FFmpeg capture exited")
 }
 
-func captureArguments(encoder string, rtpPort int) []string {
+func captureArguments(encoder string, rtpPort int, profile Profile) []string {
 	arguments := []string{
 		"-hide_banner",
 		"-loglevel", "warning",
 		"-fflags", "nobuffer",
 		"-flags", "low_delay",
 		"-f", "gdigrab",
-		"-framerate", "60",
+		"-framerate", strconv.Itoa(profile.FPS),
 		"-draw_mouse", "1",
 		"-i", "desktop",
 		"-an",
+		"-vf", profile.videoFilter(),
 		"-c:v", encoder,
-		"-pix_fmt", "yuv420p",
 		"-profile:v", "baseline",
-		"-level:v", "3.1",
-		"-g", "30",
-		"-keyint_min", "30",
+		"-g", strconv.Itoa(profile.gop()),
+		"-keyint_min", strconv.Itoa(profile.gop()),
 		"-sc_threshold", "0",
 		"-bf", "0",
 		"-max_delay", "0",
+		"-b:v", profile.bitrate(),
+		"-maxrate", profile.bitrate(),
+		"-bufsize", profile.bufferSize(),
 	}
 
 	if encoder == "h264_nvenc" {
 		arguments = append(arguments,
-			"-preset", "p1",
+			"-preset", profile.nvencPreset,
 			"-tune", "ll",
 			"-rc", "cbr",
-			"-b:v", "8M",
-			"-maxrate", "8M",
-			"-bufsize", "1M",
 			"-zerolatency", "1",
 			"-forced-idr", "1",
 		)
 	} else {
+		gop := strconv.Itoa(profile.gop())
 		arguments = append(arguments,
-			"-preset", "ultrafast",
+			"-preset", profile.x264Preset,
 			"-tune", "zerolatency",
-			"-b:v", "8M",
-			"-maxrate", "8M",
-			"-bufsize", "1M",
-			"-x264-params", "repeat-headers=1:keyint=30:min-keyint=30:scenecut=0",
+			"-x264-params", "repeat-headers=1:keyint="+gop+":min-keyint="+gop+":scenecut=0",
 		)
 	}
 
@@ -202,6 +224,8 @@ func captureArguments(encoder string, rtpPort int) []string {
 		"-flush_packets", "1",
 		"-payload_type", "96",
 		"-f", "rtp",
-		fmt.Sprintf("rtp://127.0.0.1:%d?pkt_size=1200", rtpPort),
+		// Binding the sender to loopback keeps the stream off the network and
+		// avoids a Windows Firewall prompt for ffmpeg.exe.
+		fmt.Sprintf("rtp://127.0.0.1:%d?pkt_size=1200&localaddr=127.0.0.1", rtpPort),
 	)
 }

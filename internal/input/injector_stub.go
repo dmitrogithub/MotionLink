@@ -14,6 +14,7 @@ func (unsupportedInjector) Move(float64, float64) error { return unsupportedErro
 func (unsupportedInjector) Button(int, bool) error      { return unsupportedError() }
 func (unsupportedInjector) Wheel(int) error             { return unsupportedError() }
 func (unsupportedInjector) Key(uint16, bool) error      { return unsupportedError() }
+func (unsupportedInjector) Text(string) error           { return unsupportedError() }
 
 func unsupportedError() error {
 	return errors.New("remote input injection is supported only on Windows amd64")

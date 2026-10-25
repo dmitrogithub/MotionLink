@@ -3,44 +3,64 @@ package signaling
 import (
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/pion/webrtc/v4"
 
-	"motionlink/internal/rtc"
+	"motionlink/internal/auth"
+	"motionlink/internal/ffmpeg"
 )
 
-const maxOfferBytes = 1 << 20
-
-type offerPayload struct {
-	Type string `json:"type"`
-	SDP  string `json:"sdp"`
+// Info is published at GET /api/info. It contains nothing secret: the web
+// client uses it to pick its connection mode and list the quality presets.
+type Info struct {
+	Role       string             `json:"role"`
+	Name       string             `json:"name"`
+	Version    string             `json:"version"`
+	Control    bool               `json:"control"`
+	Profiles   []ffmpeg.Profile   `json:"profiles"`
+	ICEServers []webrtc.ICEServer `json:"iceServers"`
 }
 
-type answerPayload struct {
-	Type string `json:"type"`
-	SDP  string `json:"sdp"`
+// HTTPConfig configures the host's own signaling endpoint.
+type HTTPConfig struct {
+	Address  string
+	Answerer *Answerer
+	Info     Info
+	// WebAssets is the built web client. It lets a phone or another PC open
+	// the host address in a browser without installing anything.
+	WebAssets fs.FS
+	Logger    *log.Logger
 }
 
-// NewHTTPServer creates the local HTTP endpoint used for non-trickle
-// offer/answer signaling. It deliberately does not use a package-global mux.
-func NewHTTPServer(address string, rtcServer *rtc.Server, logger *log.Logger) *http.Server {
-	handler := &handler{rtcServer: rtcServer, logger: logger}
+// NewHTTPServer creates the host endpoint used for non-trickle offer/answer
+// signaling. It deliberately does not use a package-global mux.
+func NewHTTPServer(config HTTPConfig) *http.Server {
+	handler := &handler{answerer: config.Answerer, info: config.Info, logger: config.Logger}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handler.health)
+	mux.HandleFunc("GET /api/info", handler.infoHandler)
 	mux.HandleFunc("POST /api/offer", handler.offer)
+	if config.WebAssets != nil {
+		mux.Handle("GET /", StaticHandler(config.WebAssets))
+	}
 
 	return &http.Server{
-		Addr:    address,
-		Handler: withCORS(mux),
+		Addr:              config.Address,
+		Handler:           WithCORS(mux),
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 }
 
 type handler struct {
-	rtcServer *rtc.Server
-	logger    *log.Logger
+	answerer *Answerer
+	info     Info
+	logger   *log.Logger
 }
 
 func (h *handler) health(writer http.ResponseWriter, _ *http.Request) {
@@ -48,60 +68,54 @@ func (h *handler) health(writer http.ResponseWriter, _ *http.Request) {
 	_, _ = writer.Write([]byte(`{"ok":true}`))
 }
 
+func (h *handler) infoHandler(writer http.ResponseWriter, _ *http.Request) {
+	writeJSON(writer, http.StatusOK, h.info)
+}
+
 func (h *handler) offer(writer http.ResponseWriter, request *http.Request) {
 	request.Body = http.MaxBytesReader(writer, request.Body, maxOfferBytes)
 	defer request.Body.Close()
 
-	var payload offerPayload
-	decoder := json.NewDecoder(request.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&payload); err != nil {
-		writeJSONError(writer, http.StatusBadRequest, "invalid offer JSON")
-		return
-	}
-	if payload.Type != "offer" || strings.TrimSpace(payload.SDP) == "" {
-		writeJSONError(writer, http.StatusBadRequest, "an SDP offer is required")
+	var offer auth.Offer
+	if err := json.NewDecoder(request.Body).Decode(&offer); err != nil {
+		writeJSONError(writer, &auth.Error{Status: http.StatusBadRequest, Code: "bad-request", Message: "invalid offer JSON"})
 		return
 	}
 
-	answer, err := h.rtcServer.AcceptOffer(webrtc.SessionDescription{
-		Type: webrtc.SDPTypeOffer,
-		SDP:  payload.SDP,
-	})
+	answer, err := h.answerer.Answer(remoteIP(request), offer, nil)
 	if err != nil {
-		var busyError rtc.ClientAlreadyConnectedError
-		if errors.As(err, &busyError) {
-			writeJSONError(writer, http.StatusConflict, err.Error())
-			return
-		}
-		h.logger.Printf("offer rejected: %v", err)
-		writeJSONError(writer, http.StatusInternalServerError, "could not create WebRTC answer")
+		writeJSONError(writer, err)
 		return
 	}
-
-	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(answerPayload{Type: answer.Type.String(), SDP: answer.SDP})
+	writeJSON(writer, http.StatusOK, answer)
 }
 
-func withCORS(next http.Handler) http.Handler {
-	allowedOrigins := map[string]struct{}{
-		"http://127.0.0.1:5173": {},
-		"http://localhost:5173": {},
-		// Wails uses an embedded WebView2 window instead of a browser tab.
-		// The exact origin differs between Wails runtimes, so accept both
-		// supported Windows values while the signaling server itself remains
-		// bound to localhost.
-		"http://wails.localhost":  {},
-		"https://wails.localhost": {},
-		"wails://wails":           {},
-	}
+// StaticHandler serves the web client and keeps the entry points uncached so
+// a phone picks up a new client version immediately.
+func StaticHandler(assets fs.FS) http.Handler {
+	files := http.FileServerFS(assets)
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		origin := request.Header.Get("Origin")
-		if _, allowed := allowedOrigins[origin]; allowed {
-			writer.Header().Set("Access-Control-Allow-Origin", origin)
-			writer.Header().Set("Vary", "Origin")
+		path := request.URL.Path
+		if path == "/" || strings.HasSuffix(path, ".html") || strings.HasSuffix(path, "sw.js") || strings.HasSuffix(path, ".webmanifest") {
+			writer.Header().Set("Cache-Control", "no-cache")
+		} else if strings.HasPrefix(path, "/assets/") {
+			writer.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		}
+		files.ServeHTTP(writer, request)
+	})
+}
+
+// WithCORS allows any origin. Every request that matters is authenticated by
+// an HMAC of the access key rather than by cookies or by the origin, so the
+// desktop application, a page served by a relay, and a page served by another
+// host can all reach this endpoint.
+func WithCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Origin") != "" {
+			writer.Header().Set("Access-Control-Allow-Origin", "*")
 			writer.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
 			writer.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			writer.Header().Set("Access-Control-Max-Age", "600")
 		}
 		if request.Method == http.MethodOptions {
 			writer.WriteHeader(http.StatusNoContent)
@@ -111,8 +125,24 @@ func withCORS(next http.Handler) http.Handler {
 	})
 }
 
-func writeJSONError(writer http.ResponseWriter, status int, message string) {
+func remoteIP(request *http.Request) string {
+	host, _, err := net.SplitHostPort(request.RemoteAddr)
+	if err != nil {
+		return request.RemoteAddr
+	}
+	return host
+}
+
+func writeJSON(writer http.ResponseWriter, status int, value any) {
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(status)
-	_ = json.NewEncoder(writer).Encode(map[string]string{"error": message})
+	_ = json.NewEncoder(writer).Encode(value)
+}
+
+func writeJSONError(writer http.ResponseWriter, err error) {
+	var authError *auth.Error
+	if !errors.As(err, &authError) {
+		authError = &auth.Error{Status: http.StatusInternalServerError, Code: "internal", Message: err.Error()}
+	}
+	writeJSON(writer, authError.Status, authError)
 }

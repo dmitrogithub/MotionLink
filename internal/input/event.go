@@ -8,9 +8,13 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"unicode/utf8"
 )
 
 const maxMessageBytes = 4096
+
+// maxTextBytes bounds one text event from a phone's on-screen keyboard.
+const maxTextBytes = 256
 
 const (
 	EventControl = "control"
@@ -18,6 +22,7 @@ const (
 	EventButton  = "button"
 	EventWheel   = "wheel"
 	EventKey     = "key"
+	EventText    = "text"
 )
 
 // Event is a small, transport-neutral control message. Pointer coordinates are
@@ -32,6 +37,7 @@ type Event struct {
 	Delta   int     `json:"delta,omitempty"`
 	Code    string  `json:"code,omitempty"`
 	Down    bool    `json:"down,omitempty"`
+	Text    string  `json:"text,omitempty"`
 }
 
 // Decode parses one DataChannel message and rejects malformed or unexpected
@@ -86,6 +92,11 @@ func validate(event Event) error {
 	case EventKey:
 		if len(event.Code) == 0 || len(event.Code) > 32 {
 			return fmt.Errorf("keyboard code length must be between 1 and 32")
+		}
+		return nil
+	case EventText:
+		if len(event.Text) == 0 || len(event.Text) > maxTextBytes || !utf8.ValidString(event.Text) {
+			return fmt.Errorf("text must be valid UTF-8 between 1 and %d bytes", maxTextBytes)
 		}
 		return nil
 	default:

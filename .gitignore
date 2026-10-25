@@ -4,8 +4,11 @@
 
 # Frontend
 /web/node_modules/
-/web/dist/
+# web/dist is committed: the host and relay embed it, so Go builds need no Node.js
 
 # Local runtime files
 /components/
 *.log
+
+# Build output
+/dist/

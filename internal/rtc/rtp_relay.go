@@ -12,16 +12,31 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
+// udpReadBuffer absorbs keyframe bursts at high bitrates; the OS default
+// (64 KiB on Windows) drops packets of a 25 Mbit/s IDR frame.
+const udpReadBuffer = 4 << 20
+
 // RTPRelay receives H.264 RTP packets emitted by FFmpeg and forwards them to
-// a Pion TrackLocalStaticRTP. A relay is owned by one browser session.
+// a Pion TrackLocalStaticRTP. A relay is owned by one client session.
+//
+// FFmpeg restarts when the client switches quality, and each process starts a
+// new SSRC, sequence and timestamp space. The relay rewrites both counters so
+// the receiver sees one continuous stream instead of a jump it may discard.
 type RTPRelay struct {
-	connection *net.UDPConn
-	track      *webrtc.TrackLocalStaticRTP
-	logger     *log.Logger
-	done       chan struct{}
-	closeOnce  sync.Once
+	connection  *net.UDPConn
+	track       *webrtc.TrackLocalStaticRTP
+	logger      *log.Logger
+	done        chan struct{}
+	closeOnce   sync.Once
 	firstPacket sync.Once
 	packetCount atomic.Uint64
+
+	// Only the run goroutine touches the rewrite state.
+	sourceSSRC      uint32
+	haveSource      bool
+	sequence        uint16
+	timestampOffset uint32
+	lastTimestamp   uint32
 }
 
 func NewRTPRelay(port int, track *webrtc.TrackLocalStaticRTP, logger *log.Logger) (*RTPRelay, error) {
@@ -38,6 +53,9 @@ func NewRTPRelay(port int, track *webrtc.TrackLocalStaticRTP, logger *log.Logger
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listen for FFmpeg RTP on 127.0.0.1:%d: %w", port, err)
+	}
+	if err := connection.SetReadBuffer(udpReadBuffer); err != nil {
+		logger.Printf("enlarge RTP receive buffer: %v", err)
 	}
 
 	return &RTPRelay{
@@ -82,6 +100,7 @@ func (r *RTPRelay) run() {
 			r.logger.Printf("discard invalid RTP packet: %v", err)
 			continue
 		}
+		r.rewrite(packet)
 		if err := r.track.WriteRTP(packet); err != nil {
 			r.logger.Printf("forward RTP packet to WebRTC: %v", err)
 			continue
@@ -91,4 +110,24 @@ func (r *RTPRelay) run() {
 			r.logger.Printf("desktop RTP is flowing: first H.264 packet received from FFmpeg")
 		})
 	}
+}
+
+// rewrite maps the packet into the relay's continuous sequence and timestamp
+// space. A new source SSRC marks a restarted FFmpeg process.
+func (r *RTPRelay) rewrite(packet *rtp.Packet) {
+	if !r.haveSource || packet.SSRC != r.sourceSSRC {
+		// Continue one 90 kHz frame interval (at 60 FPS) after the last
+		// forwarded frame so the receiver's clock keeps moving forward.
+		next := r.lastTimestamp + 1500
+		if !r.haveSource {
+			next = packet.Timestamp
+		}
+		r.timestampOffset = next - packet.Timestamp
+		r.sourceSSRC = packet.SSRC
+		r.haveSource = true
+	}
+	r.sequence++
+	packet.SequenceNumber = r.sequence
+	packet.Timestamp += r.timestampOffset
+	r.lastTimestamp = packet.Timestamp
 }

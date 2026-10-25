@@ -7,4 +7,7 @@ type systemInjector interface {
 	Button(button int, down bool) error
 	Wheel(delta int) error
 	Key(virtualKey uint16, down bool) error
+	// Text types Unicode characters directly, independent of the host's
+	// keyboard layout.
+	Text(text string) error
 }

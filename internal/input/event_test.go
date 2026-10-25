@@ -19,6 +19,7 @@ func TestDecodeRejectsInvalidControlMessages(t *testing.T) {
 		`{"type":"key","code":""}`,
 		`{"type":"unknown"}`,
 		`{"type":"pointer","x":0,"y":0,"unexpected":true}`,
+		`{"type":"text","text":""}`,
 	}
 
 	for _, payload := range testCases {
@@ -27,5 +28,15 @@ func TestDecodeRejectsInvalidControlMessages(t *testing.T) {
 				t.Fatalf("Decode(%s) succeeded, want validation error", payload)
 			}
 		})
+	}
+}
+
+func TestDecodeAcceptsUnicodeText(t *testing.T) {
+	event, err := Decode([]byte(`{"type":"text","text":"Grüße 👋 日本"}`))
+	if err != nil {
+		t.Fatalf("Decode returned an error: %v", err)
+	}
+	if event.Type != EventText || event.Text != "Grüße 👋 日本" {
+		t.Fatalf("Decode returned %+v", event)
 	}
 }

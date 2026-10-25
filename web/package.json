@@ -1,12 +1,13 @@
 {
   "name": "motionlink-web",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host 127.0.0.1 --port 5173",
+    "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview --host 127.0.0.1 --port 4173"
+    "preview": "vite preview --host 0.0.0.0 --port 4173",
+    "check:crypto": "node scripts/crypto-check.mjs"
   },
   "devDependencies": {
     "typescript": "~5.9.2",

@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/pion/webrtc/v4"
 
@@ -15,25 +15,31 @@ import (
 	hostinput "motionlink/internal/input"
 )
 
-// ClientAlreadyConnectedError is returned while a browser session is active.
-// A typed error avoids a package-level mutable sentinel.
-type ClientAlreadyConnectedError struct{}
-
-func (ClientAlreadyConnectedError) Error() string {
-	return "a browser client is already connected or connecting"
-}
-
 type Config struct {
 	RTPPort        int
 	FFmpegManager  *ffmpeg.Manager
 	Logger         *log.Logger
 	ControlEnabled bool
+	Network        NetworkConfig
 }
 
-// Server accepts one WebRTC client and owns its FFmpeg capture lifecycle.
+const (
+	// gatherTimeout bounds non-trickle ICE gathering; a slow TURN server must
+	// not stall the answer, so whatever was gathered by then is sent.
+	gatherTimeout = 4 * time.Second
+	// reconnectGrace keeps a briefly disconnected session alive, so a phone
+	// switching between Wi-Fi and mobile data does not lose the stream.
+	reconnectGrace = 15 * time.Second
+)
+
+// Server serves one client at a time and owns its FFmpeg capture lifecycle.
+// Offers reach it only after the signaling layer has verified the access key,
+// so a new authenticated client replaces the previous session; this is what
+// lets a client reconnect immediately after a network change.
 type Server struct {
 	context context.Context
 	config  Config
+	network *networkStack
 
 	mu     sync.Mutex
 	active *session
@@ -48,6 +54,11 @@ type session struct {
 	relay   *RTPRelay
 	control *hostinput.Controller
 
+	captureMu      sync.Mutex
+	profile        ffmpeg.Profile
+	captureStarted bool
+	graceTimer     *time.Timer
+
 	closeOnce sync.Once
 }
 
@@ -61,16 +72,30 @@ func NewServer(parentContext context.Context, config Config) (*Server, error) {
 	if config.FFmpegManager == nil || config.Logger == nil {
 		return nil, errors.New("FFmpeg manager and logger are required")
 	}
-	return &Server{context: parentContext, config: config}, nil
+	network, err := newNetworkStack(config.Network, config.Logger)
+	if err != nil {
+		return nil, err
+	}
+	return &Server{context: parentContext, config: config, network: network}, nil
 }
 
-// AcceptOffer creates an answer for exactly one active browser client.
-func (s *Server) AcceptOffer(offer webrtc.SessionDescription) (webrtc.SessionDescription, error) {
+// ControlEnabled reports whether the host allows remote input at all.
+func (s *Server) ControlEnabled() bool {
+	return s.config.ControlEnabled
+}
+
+// AcceptOffer creates an answer for an authenticated client. extraICEServers
+// are per-session servers, such as TURN credentials issued by a relay.
+func (s *Server) AcceptOffer(offer webrtc.SessionDescription, quality string, extraICEServers []webrtc.ICEServer) (webrtc.SessionDescription, error) {
 	if offer.Type != webrtc.SDPTypeOffer || offer.SDP == "" {
 		return webrtc.SessionDescription{}, errors.New("a non-empty WebRTC offer is required")
 	}
+	profile, err := ffmpeg.LookupProfile(quality)
+	if err != nil {
+		return webrtc.SessionDescription{}, err
+	}
 
-	session, err := s.newSession()
+	session, err := s.newSession(profile, extraICEServers)
 	if err != nil {
 		return webrtc.SessionDescription{}, err
 	}
@@ -93,6 +118,8 @@ func (s *Server) AcceptOffer(offer webrtc.SessionDescription) (webrtc.SessionDes
 	}
 	select {
 	case <-gatherComplete:
+	case <-time.After(gatherTimeout):
+		s.config.Logger.Printf("ICE gathering is slow; answering with the candidates gathered so far")
 	case <-s.context.Done():
 		session.close("server stopped while gathering ICE candidates")
 		return webrtc.SessionDescription{}, s.context.Err()
@@ -114,20 +141,25 @@ func (s *Server) Close() {
 	if active != nil {
 		active.close("server stopped")
 	}
+	s.network.close()
 }
 
-func (s *Server) newSession() (*session, error) {
+func (s *Server) newSession(profile ffmpeg.Profile, extraICEServers []webrtc.ICEServer) (*session, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.closed {
+	previous := s.active
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
 		return nil, errors.New("RTC server is closed")
 	}
-	if s.active != nil {
-		return nil, ClientAlreadyConnectedError{}
+	// The previous session must release the RTP port and FFmpeg before the
+	// new one claims them.
+	if previous != nil {
+		previous.close("replaced by a new authenticated client")
 	}
 
-	peer, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	iceServers := append(append([]webrtc.ICEServer(nil), s.config.Network.ICEServers...), extraICEServers...)
+	peer, err := s.network.api.NewPeerConnection(webrtc.Configuration{ICEServers: iceServers})
 	if err != nil {
 		return nil, fmt.Errorf("create peer connection: %w", err)
 	}
@@ -154,6 +186,7 @@ func (s *Server) newSession() (*session, error) {
 		peer:    peer,
 		relay:   relay,
 		control: hostinput.NewController(s.config.ControlEnabled, s.config.Logger),
+		profile: profile,
 	}
 
 	sender, err := peer.AddTrack(track)
@@ -163,7 +196,18 @@ func (s *Server) newSession() (*session, error) {
 		_ = peer.Close()
 		return nil, fmt.Errorf("add H.264 track: %w", err)
 	}
+
+	s.mu.Lock()
+	if s.closed || s.active != nil {
+		s.mu.Unlock()
+		cancel()
+		relay.Close()
+		_ = peer.Close()
+		return nil, errors.New("another client connected at the same moment; retry")
+	}
 	s.active = current
+	s.mu.Unlock()
+
 	s.configurePeerConnection(current)
 	relay.Start()
 	go drainRTCP(sender)
@@ -181,10 +225,14 @@ func (s *Server) configurePeerConnection(current *session) {
 
 		channel.OnOpen(func() {
 			s.config.Logger.Printf("motion-input data channel opened")
+			current.sendHello(channel)
 		})
 		channel.OnMessage(func(message webrtc.DataChannelMessage) {
 			if !message.IsString {
 				s.config.Logger.Printf("ignoring binary motion-input message")
+				return
+			}
+			if current.handleSessionMessage(channel, message.Data) {
 				return
 			}
 			event, err := hostinput.Decode(message.Data)
@@ -197,46 +245,199 @@ func (s *Server) configurePeerConnection(current *session) {
 				s.config.Logger.Printf("apply motion-input event %q: %v", event.Type, err)
 			}
 			if event.Type == hostinput.EventControl {
-				current.sendControlStatus(channel, result)
+				current.send(channel, controlStatusMessage{
+					Type:    "control-status",
+					Enabled: result.Enabled,
+					Message: result.Message,
+				})
 			}
 		})
+	})
+
+	current.peer.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		if state == webrtc.ICEConnectionStateConnected {
+			current.logSelectedPath()
+		}
 	})
 
 	current.peer.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		s.config.Logger.Printf("WebRTC connection state: %s", state.String())
 		switch state {
 		case webrtc.PeerConnectionStateConnected:
+			current.stopGraceTimer()
 			go current.startCapture()
-		case webrtc.PeerConnectionStateDisconnected, webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
-			go current.close("browser client disconnected")
+		case webrtc.PeerConnectionStateDisconnected:
+			current.startGraceTimer()
+		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
+			go current.close("client disconnected")
 		}
 	})
 }
 
-func (s *session) sendControlStatus(channel *webrtc.DataChannel, result hostinput.Result) {
-	payload, err := json.Marshal(struct {
-		Type    string `json:"type"`
-		Enabled bool   `json:"enabled"`
-		Message string `json:"message"`
-	}{
-		Type:    "control-status",
-		Enabled: result.Enabled,
-		Message: result.Message,
+type controlStatusMessage struct {
+	Type    string `json:"type"`
+	Enabled bool   `json:"enabled"`
+	Message string `json:"message"`
+}
+
+type helloMessage struct {
+	Type     string           `json:"type"`
+	Quality  string           `json:"quality"`
+	Profiles []ffmpeg.Profile `json:"profiles"`
+	Control  bool             `json:"control"`
+}
+
+type qualityStatusMessage struct {
+	Type    string `json:"type"`
+	Quality string `json:"quality"`
+	OK      bool   `json:"ok"`
+	Message string `json:"message,omitempty"`
+}
+
+type sessionMessage struct {
+	Type    string          `json:"type"`
+	Quality string          `json:"quality"`
+	Time    json.RawMessage `json:"t"`
+}
+
+// handleSessionMessage processes non-input messages (quality and ping). It
+// returns false for anything that should go through the input validator.
+func (s *session) handleSessionMessage(channel *webrtc.DataChannel, payload []byte) bool {
+	if len(payload) > 1024 {
+		return false
+	}
+	var message sessionMessage
+	if err := json.Unmarshal(payload, &message); err != nil {
+		return false
+	}
+	switch message.Type {
+	case "ping":
+		s.send(channel, struct {
+			Type string          `json:"type"`
+			Time json.RawMessage `json:"t"`
+		}{Type: "pong", Time: message.Time})
+		return true
+	case "quality":
+		go s.changeQuality(channel, message.Quality)
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *session) sendHello(channel *webrtc.DataChannel) {
+	s.captureMu.Lock()
+	quality := s.profile.ID
+	s.captureMu.Unlock()
+	s.send(channel, helloMessage{
+		Type:     "hello",
+		Quality:  quality,
+		Profiles: ffmpeg.Profiles(),
+		Control:  s.server.config.ControlEnabled,
 	})
+}
+
+func (s *session) changeQuality(channel *webrtc.DataChannel, quality string) {
+	profile, err := ffmpeg.LookupProfile(quality)
 	if err != nil {
-		s.server.config.Logger.Printf("encode control status: %v", err)
+		s.send(channel, qualityStatusMessage{Type: "quality-status", Quality: quality, Message: err.Error()})
+		return
+	}
+
+	s.captureMu.Lock()
+	defer s.captureMu.Unlock()
+	if s.context.Err() != nil {
+		return
+	}
+	if profile.ID == s.profile.ID {
+		s.send(channel, qualityStatusMessage{Type: "quality-status", Quality: profile.ID, OK: true})
+		return
+	}
+	previous := s.profile
+	s.profile = profile
+	if !s.captureStarted {
+		s.send(channel, qualityStatusMessage{Type: "quality-status", Quality: profile.ID, OK: true})
+		return
+	}
+
+	manager := s.server.config.FFmpegManager
+	manager.Stop()
+	if err := manager.Start(s.context, s.server.config.RTPPort, profile); err != nil {
+		s.server.config.Logger.Printf("restart capture with %s: %v; restoring %s", profile.ID, err, previous.ID)
+		s.profile = previous
+		if restoreErr := manager.Start(s.context, s.server.config.RTPPort, previous); restoreErr != nil {
+			s.server.config.Logger.Printf("cannot restore capture: %v", restoreErr)
+			go s.close("FFmpeg did not restart")
+		}
+		s.send(channel, qualityStatusMessage{Type: "quality-status", Quality: previous.ID, Message: "could not switch quality: " + err.Error()})
+		return
+	}
+	s.send(channel, qualityStatusMessage{Type: "quality-status", Quality: profile.ID, OK: true})
+}
+
+func (s *session) send(channel *webrtc.DataChannel, message any) {
+	payload, err := json.Marshal(message)
+	if err != nil {
+		s.server.config.Logger.Printf("encode data channel message: %v", err)
 		return
 	}
 	if err := channel.SendText(string(payload)); err != nil {
-		s.server.config.Logger.Printf("send control status: %v", err)
+		s.server.config.Logger.Printf("send data channel message: %v", err)
 	}
 }
 
 func (s *session) startCapture() {
-	if err := s.server.config.FFmpegManager.Start(s.context, s.server.config.RTPPort); err != nil {
-		s.server.config.Logger.Printf("cannot start desktop capture: %v", err)
-		s.close("FFmpeg did not start")
+	s.captureMu.Lock()
+	defer s.captureMu.Unlock()
+	// ICE may reconnect after a brief outage; the capture keeps running.
+	if s.captureStarted || s.context.Err() != nil {
+		return
 	}
+	if err := s.server.config.FFmpegManager.Start(s.context, s.server.config.RTPPort, s.profile); err != nil {
+		s.server.config.Logger.Printf("cannot start desktop capture: %v", err)
+		go s.close("FFmpeg did not start")
+		return
+	}
+	s.captureStarted = true
+}
+
+func (s *session) startGraceTimer() {
+	s.captureMu.Lock()
+	defer s.captureMu.Unlock()
+	if s.graceTimer != nil {
+		return
+	}
+	s.server.config.Logger.Printf("client connection interrupted; waiting %s for it to recover", reconnectGrace)
+	s.graceTimer = time.AfterFunc(reconnectGrace, func() {
+		s.close("client did not reconnect")
+	})
+}
+
+func (s *session) stopGraceTimer() {
+	s.captureMu.Lock()
+	defer s.captureMu.Unlock()
+	if s.graceTimer != nil {
+		s.graceTimer.Stop()
+		s.graceTimer = nil
+		s.server.config.Logger.Printf("client connection recovered")
+	}
+}
+
+// logSelectedPath reports whether the session runs directly, through NAT
+// traversal or through a TURN relay. It is the first thing to check when a
+// remote connection is slow.
+func (s *session) logSelectedPath() {
+	sctp := s.peer.SCTP()
+	if sctp == nil || sctp.Transport() == nil || sctp.Transport().ICETransport() == nil {
+		return
+	}
+	pair, err := sctp.Transport().ICETransport().GetSelectedCandidatePair()
+	if err != nil || pair == nil {
+		return
+	}
+	s.server.config.Logger.Printf("network path: local %s/%s %s:%d <-> remote %s/%s %s:%d",
+		pair.Local.Typ, pair.Local.Protocol, pair.Local.Address, pair.Local.Port,
+		pair.Remote.Typ, pair.Remote.Protocol, pair.Remote.Address, pair.Remote.Port)
 }
 
 func (s *session) close(reason string) {
@@ -246,7 +447,14 @@ func (s *session) close(reason string) {
 			s.server.config.Logger.Printf("release remote input: %v", err)
 		}
 		s.cancel()
+
+		s.captureMu.Lock()
+		if s.graceTimer != nil {
+			s.graceTimer.Stop()
+		}
 		s.server.config.FFmpegManager.Stop()
+		s.captureMu.Unlock()
+
 		s.relay.Close()
 		_ = s.peer.Close()
 
@@ -262,9 +470,6 @@ func drainRTCP(sender *webrtc.RTPSender) {
 	buffer := make([]byte, 1500)
 	for {
 		if _, _, err := sender.Read(buffer); err != nil {
-			if !errors.Is(err, io.EOF) {
-				return
-			}
 			return
 		}
 	}
